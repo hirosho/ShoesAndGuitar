@@ -7,6 +7,10 @@ using Windows.Storage;
 using Windows.Storage.Streams;
 using Windows.UI.Core;
 using Windows.UI.Xaml.Controls;
+using System.Text;
+using Microsoft.Azure.Devices.Client;
+using System.IO;
+using Microsoft.Azure.Devices.Client.Exceptions;
 
 public class Library
 {
@@ -85,23 +89,73 @@ public class Library
         }
         await dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
         {
-            Debug.WriteLine("Step 1");
             StorageFile storageFile = await storageFolder.CreateFileAsync(audioFilename, CreationCollisionOption.GenerateUniqueName);
             filename = storageFile.Name;
-            Debug.WriteLine(storageFile.Path);
             using (IRandomAccessStream fileStream = await storageFile.OpenAsync(FileAccessMode.ReadWrite))
             {
                 await RandomAccessStream.CopyAndCloseAsync(audio.GetInputStreamAt(0), fileStream.GetOutputStreamAt(0));
                 await audio.FlushAsync();
                 audio.Dispose();
-                Debug.WriteLine("Step 2");
             }
-            IRandomAccessStream stream = await storageFile.OpenAsync(FileAccessMode.Read);
+            IRandomAccessStream stream = await storageFile.OpenAsync(FileAccessMode.ReadWrite);
+            SendDeviceToCloudMessagesAsync(stream); //Send to IoT Hub
             playback.SetSource(stream, storageFile.FileType);
-            Debug.WriteLine("Step 3");
             playback.Play();
-            Debug.WriteLine("Step 4");
+            Debug.WriteLine(await ReceiveCloudToDeviceMessageAsync());
 
         });
     }
+
+    static async void SendDeviceToCloudMessagesAsync(IRandomAccessStream song)
+    {
+        
+        var deviceClient = DeviceClient.Create(iotHubUri,
+                AuthenticationMethodFactory.
+                    CreateAuthenticationWithRegistrySymmetricKey(deviceId, deviceKey),
+                TransportType.Http1);
+
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+
+        try
+        {
+            var ioStream = song.AsStream();
+            ioStream.Seek(0, SeekOrigin.Begin);
+            //song.AsStream().Seek(0, SeekOrigin.Begin);
+            //Debug.WriteLine(song.AsStream());
+            await deviceClient.UploadToBlobAsync("test_" + DateTime.Now.ToString().Replace(" ", "") +".mp3", ioStream);
+        }
+        catch (IotHubCommunicationException)
+        {
+            watch.Stop();
+            Debug.WriteLine("Time to upload file timeout: {0}ms\n", watch.ElapsedMilliseconds);
+        }
+
+        Debug.WriteLine("Successful upload: {0}ms\n", watch.ElapsedMilliseconds);
+
+        song.Dispose();
+
+    }
+
+    public static async Task<string> ReceiveCloudToDeviceMessageAsync()
+    {
+
+    var deviceClient = DeviceClient.CreateFromConnectionString("HostName=EGCSESyncWeek201758.azure-devices.net;DeviceId=guitardevice;SharedAccessKey=XZ2U7kCZgg0wphJJUwaw5drk9H2hU38kFPaPkJKcUtU=", TransportType.Amqp);
+
+        while (true)
+        {
+            var receivedMessage = await deviceClient.ReceiveAsync();
+
+            if (receivedMessage != null)
+            {
+                var messageData = Encoding.ASCII.GetString(receivedMessage.GetBytes());
+                await deviceClient.CompleteAsync(receivedMessage);
+                return messageData;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1));
+        }
+    }
+
 }
